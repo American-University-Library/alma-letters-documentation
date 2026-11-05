@@ -24,6 +24,7 @@ Alma endpoints used:
     GET /almaws/v1/conf/letters/{letterCode}
 """
 
+import argparse
 import difflib
 import hashlib
 import json
@@ -320,12 +321,117 @@ def write_deviation_report(rows: list[list[str]], exported_at: str) -> None:
         newline="\n",
     )
 
+# ---------------------------------------------------------------------------
+# Letter-code selection
+# ---------------------------------------------------------------------------
+
+def parse_arguments():
+    """Read optional letter-code selection from the command line."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Export Alma letter templates, optionally restricted "
+            "to a supplied list of letter codes."
+        )
+    )
+
+    selection = parser.add_mutually_exclusive_group()
+
+    selection.add_argument(
+        "--codes",
+        nargs="+",
+        metavar="LETTER_CODE",
+        help=(
+            "Letter codes to export, separated by spaces. "
+            "Use exact Alma codes, not display names."
+        ),
+    )
+
+    selection.add_argument(
+        "--codes-file",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "UTF-8 text file containing one letter code per line. "
+            "Blank lines and lines starting with # are ignored."
+        ),
+    )
+
+    args = parser.parse_args()
+
+    if args.codes_file is not None:
+        try:
+            lines = args.codes_file.read_text(
+                encoding="utf-8-sig"
+            ).splitlines()
+        except (OSError, UnicodeError) as exc:
+            parser.error(f"Could not read letter-code file: {exc}")
+
+        requested_codes = [
+            line.strip()
+            for line in lines
+            if line.strip() and not line.strip().startswith("#")
+        ]
+
+        if not requested_codes:
+            parser.error("The letter-code file contains no letter codes.")
+
+    elif args.codes is not None:
+        requested_codes = [
+            code.strip()
+            for code in args.codes
+            if code.strip()
+        ]
+
+        if not requested_codes:
+            parser.error("Supply at least one nonblank letter code.")
+
+    else:
+        return None
+
+    # Remove duplicates while preserving the requested order.
+    return list(dict.fromkeys(requested_codes))
+
+
+def select_letters(
+    available_letters: list[dict],
+    requested_codes: list[str] | None,
+) -> list[dict]:
+    """Select requested codes and reject codes absent from the Alma list."""
+    if requested_codes is None:
+        return available_letters
+
+    available_by_code = {
+        letter["code"]: letter
+        for letter in available_letters
+        if isinstance(letter.get("code"), str)
+        and letter["code"].strip()
+    }
+
+    missing_codes = [
+        code
+        for code in requested_codes
+        if code not in available_by_code
+    ]
+
+    if missing_codes:
+        raise ValueError(
+            "These letter codes were not returned by Alma: "
+            + ", ".join(missing_codes)
+            + ". Check spelling, capitalization, and the API key's "
+              "institution/network-zone context."
+        )
+
+    return [
+        available_by_code[code]
+        for code in requested_codes
+    ]
 
 # ---------------------------------------------------------------------------
 # Main export
 # ---------------------------------------------------------------------------
 
 def main():
+    requested_codes = parse_arguments()
     OUTPUT_DIR.mkdir(exist_ok=True)
     DOCUMENTATION_DIR.mkdir(exist_ok=True)
     SNAPSHOT_DIR.mkdir(exist_ok=True)
@@ -333,7 +439,7 @@ def main():
     exported_at = datetime.now(timezone.utc).isoformat()
 
     try:
-        letters = fetch_all_letters()
+        available_letters = fetch_all_letters()
     except requests.HTTPError as exc:
         response = exc.response
         status = response.status_code if response is not None else "unknown"
@@ -349,12 +455,29 @@ def main():
         )
         sys.exit(1)
 
-    print(f"Retrieved {len(letters)} letters from Alma.")
+    try:
+        letters = select_letters(available_letters, requested_codes)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Retrieved {len(available_letters)} available letters from Alma.")
+    print(f"Selected {len(letters)} letters for export.")
+
+    if requested_codes is not None:
+        print(f"Requested codes: {', '.join(requested_codes)}")
 
     inventory = {
         "exported_at_utc": exported_at,
         "alma_base_url": BASE_URL,
-        "letter_count_returned": len(letters),
+        "export_scope": (
+            "selected_letters"
+            if requested_codes is not None
+            else "all_letters"
+        ),
+        "requested_codes": requested_codes,
+        "letter_count_returned": len(available_letters),
+        "letter_count_selected": len(letters),
         "letters_exported": [],
         "letters_skipped": [],
     }
@@ -489,7 +612,8 @@ def main():
     print("\n" + "=" * 60)
     print("EXPORT SUMMARY")
     print("=" * 60)
-    print(f"Letters returned by Alma : {len(letters)}")
+    print(f"Letters returned by Alma : {len(available_letters)}")
+    print(f"Letters selected         : {len(letters)}")
     print(f"Templates exported       : {exported_count}")
     print(f"Letters skipped          : {skipped_count}")
     print(f"Template folder          : {OUTPUT_DIR}")
