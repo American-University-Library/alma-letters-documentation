@@ -53,7 +53,7 @@ SNAPSHOT_DIR = DOCUMENTATION_DIR / "default_snapshots"
 INVENTORY_PATH = DOCUMENTATION_DIR / "letter-inventory.json"
 DEVIATION_REPORT_PATH = DOCUMENTATION_DIR / "deviation_report.md"
 
-API_KEY = os.environ.get("ALMA_API_KEY")
+API_KEY = os.environ.get("ALMA_API_KEY", "").strip()
 
 if not API_KEY:
     raise RuntimeError(
@@ -443,10 +443,27 @@ def main():
     except requests.HTTPError as exc:
         response = exc.response
         status = response.status_code if response is not None else "unknown"
+
         print(
             f"ERROR: Could not retrieve the Alma letter list. HTTP {status}.",
             file=sys.stderr,
         )
+
+        if response is not None:
+            # Print only a limited response excerpt, never request headers.
+            # Redact the configured key if it appears in the response.
+            error_body = response.text or "(empty response body)"
+            error_body = error_body.replace(API_KEY, "[REDACTED]")
+
+            print(
+                "Alma error response:",
+                file=sys.stderr,
+            )
+            print(
+                error_body[:2000],
+                file=sys.stderr,
+            )
+
         sys.exit(1)
     except requests.RequestException as exc:
         print(
